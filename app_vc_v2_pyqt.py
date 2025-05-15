@@ -6,6 +6,7 @@ import tempfile
 import numpy as np
 import librosa
 import soundfile as sf
+import time
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List, Generator
 from PyQt6.QtWidgets import (
@@ -63,19 +64,20 @@ class VoiceConversionThread(QThread):
     conversionComplete = pyqtSignal(str)  # Signal with path to output file
     errorOccurred = pyqtSignal(str)   # Signal for error reporting
 
-    def __init__(self, vc_wrapper, source_path, target_path, params, output_dir=None):
+    def __init__(self, vc_wrapper, source_path, target_path, params, output_dir):
         super().__init__()
         self.vc_wrapper = vc_wrapper
         self.source_path = source_path
         self.target_path = target_path
         self.params = params
-        self.output_dir = output_dir if output_dir else tempfile.gettempdir()
+        self.output_dir = output_dir
         self.cancel_requested = False
         
-        # Create output filename based on source filename
+        # Create output filename based on source filename with timestamp
         source_basename = os.path.basename(source_path)
         source_name = os.path.splitext(source_basename)[0]
-        self.output_path = os.path.join(self.output_dir, f"{source_name}_converted.wav")
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        self.output_path = os.path.join(self.output_dir, f"{source_name}_{timestamp}.wav")
         
     def run(self):
         try:
@@ -275,9 +277,10 @@ class SliderWithValue(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, vc_wrapper, examples=None):
+    def __init__(self, vc_wrapper, output_dir, examples=None):
         super().__init__()
         self.vc_wrapper = vc_wrapper
+        self.output_dir = output_dir
         self.examples = examples or []
         self.audio_players = {
             'source': AudioPlayer(self),
@@ -309,6 +312,19 @@ class MainWindow(QMainWindow):
         desc_label.setOpenExternalLinks(True)
         desc_label.setWordWrap(True)
         main_layout.addWidget(desc_label)
+
+        # Add output folder display
+        output_folder_layout = QHBoxLayout()
+        output_folder_label = QLabel("Output Folder:")
+        self.output_folder_path = QLabel(self.output_dir)
+        self.output_folder_path.setStyleSheet("font-weight: bold;")
+        output_folder_open_btn = QPushButton("Open Folder")
+        output_folder_open_btn.clicked.connect(self.openOutputFolder)
+        
+        output_folder_layout.addWidget(output_folder_label)
+        output_folder_layout.addWidget(self.output_folder_path, 1)
+        output_folder_layout.addWidget(output_folder_open_btn)
+        main_layout.addLayout(output_folder_layout)
         
         # File input section
         file_group = QGroupBox("Audio Input Files")
@@ -461,7 +477,7 @@ class MainWindow(QMainWindow):
         output_layout = QHBoxLayout(output_group)
         
         # Add output controls
-        self.output_play_btn = QPushButton("Play")
+        self.output_play_btn = QPushButton("Play Output")
         self.output_play_btn.setEnabled(False)
         self.output_play_btn.clicked.connect(lambda: self.playAudio('output'))
         
@@ -469,20 +485,31 @@ class MainWindow(QMainWindow):
         self.output_stop_btn.setEnabled(False)
         self.output_stop_btn.clicked.connect(lambda: self.stopAudio('output'))
         
-        self.output_save_btn = QPushButton("Save As...")
-        self.output_save_btn.setEnabled(False)
-        self.output_save_btn.clicked.connect(self.saveOutputFile)
+        self.last_output_label = QLabel("No output generated yet")
+        self.last_output_label.setStyleSheet("color: gray;")
         
         output_layout.addWidget(self.output_play_btn)
         output_layout.addWidget(self.output_stop_btn)
-        output_layout.addWidget(self.output_save_btn)
-        output_layout.addStretch(1)
+        output_layout.addWidget(self.last_output_label, 1)
         
         main_layout.addWidget(output_group)
         
         # Add some stretch at the end
         main_layout.addStretch(1)
         
+    def openOutputFolder(self):
+        """Open the output folder in the file explorer."""
+        if os.path.exists(self.output_dir):
+            # Use the appropriate command based on the operating system
+            if sys.platform == 'win32':
+                os.startfile(self.output_dir)
+            elif sys.platform == 'darwin':  # macOS
+                import subprocess
+                subprocess.Popen(['open', self.output_dir])
+            else:  # Linux and other Unix-like
+                import subprocess
+                subprocess.Popen(['xdg-open', self.output_dir])
+                
     def selectSourceFile(self):
         """Open a file dialog to select the source audio file."""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -574,7 +601,7 @@ class MainWindow(QMainWindow):
         
         # Create and start the conversion thread
         self.conversion_thread = VoiceConversionThread(
-            self.vc_wrapper, source_path, target_path, params
+            self.vc_wrapper, source_path, target_path, params, self.output_dir
         )
         
         # Connect signals
@@ -604,19 +631,21 @@ class MainWindow(QMainWindow):
         
     def handleStreamOutput(self, audio_data):
         """Handle streaming audio output."""
-        # TODO: Play streaming audio (needs more complex implementation)
-        # For now, we'll just update the status
+        # Just update the status for now
         self.updateStatus("Received audio stream chunk...")
         
     def handleConversionComplete(self, output_path):
         """Handle completion of the conversion process."""
         self.output_file_path = output_path
-        self.updateStatus(f"Conversion complete! Output saved to: {output_path}")
+        filename = os.path.basename(output_path)
+        self.last_output_label.setText(filename)
+        self.last_output_label.setStyleSheet("")
+        
+        self.updateStatus(f"Conversion complete! Output saved to: {filename}")
         
         # Enable output controls
         self.output_play_btn.setEnabled(True)
         self.output_stop_btn.setEnabled(True)
-        self.output_save_btn.setEnabled(True)
         
         # Play the output
         self.playAudio('output')
@@ -631,26 +660,7 @@ class MainWindow(QMainWindow):
         # Re-enable controls
         self.convert_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
-        
-    def saveOutputFile(self):
-        """Save the output audio file to a user-selected location."""
-        if not self.output_file_path:
-            return
-            
-        # Open file dialog
-        save_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Converted Audio", "", "WAV Files (*.wav);;MP3 Files (*.mp3)"
-        )
-        
-        if save_path:
-            # Copy the file
-            try:
-                import shutil
-                shutil.copy2(self.output_file_path, save_path)
-                self.updateStatus(f"Saved output to: {save_path}")
-            except Exception as e:
-                QMessageBox.critical(self, "Save Error", f"Error saving file: {str(e)}")
-                
+    
     def closeEvent(self, event):
         """Handle window close event."""
         # Stop any ongoing conversion
@@ -667,6 +677,15 @@ class MainWindow(QMainWindow):
 
 
 def main(args):
+    # Create a standard output directory
+    if args.output_dir:
+        output_dir = args.output_dir
+    else:
+        output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+    
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        
     # Load models
     vc_wrapper = load_models(args)
     
@@ -678,7 +697,7 @@ def main(args):
     
     # Create and show the application
     app = QApplication(sys.argv)
-    window = MainWindow(vc_wrapper, examples)
+    window = MainWindow(vc_wrapper, output_dir=output_dir, examples=examples)
     window.show()
     sys.exit(app.exec())
 
@@ -692,5 +711,7 @@ if __name__ == "__main__":
                         help="Path to custom checkpoint file")
     parser.add_argument("--cfm-checkpoint-path", type=str, default=None,
                         help="Path to custom checkpoint file")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Directory to save converted audio files")
     args = parser.parse_args()
     main(args)
