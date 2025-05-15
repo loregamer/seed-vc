@@ -385,43 +385,9 @@ class MainWindow(QMainWindow):
         desc_label.setWordWrap(True)
         main_layout.addWidget(desc_label)
         
-        # File input section
+        # File input section - Reference Audio
         file_group = QGroupBox("Audio Input Files")
         file_layout = QVBoxLayout(file_group)
-        
-        # Source audio selection
-        source_group = QGroupBox("Source Audio Files")
-        source_layout = QVBoxLayout(source_group)
-        
-        # Header with buttons
-        header_layout = QHBoxLayout()
-        header_layout.addWidget(QLabel("Add files to convert - each file will be converted using the same reference audio"))
-        header_layout.addStretch(1)
-        source_layout.addLayout(header_layout)
-        
-        # Button bar
-        button_layout = QHBoxLayout()
-        add_files_btn = QPushButton("Add Files...")
-        add_files_btn.clicked.connect(self.addSourceFiles)
-        clear_all_btn = QPushButton("Clear All")
-        clear_all_btn.clicked.connect(self.clearSourceFiles)
-        
-        button_layout.addWidget(add_files_btn)
-        button_layout.addWidget(clear_all_btn)
-        button_layout.addStretch(1)
-        source_layout.addLayout(button_layout)
-        
-        # Create scroll area for files
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_content = QWidget()
-        self.files_layout = QVBoxLayout(scroll_content)
-        self.files_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        scroll_area.setWidget(scroll_content)
-        source_layout.addWidget(scroll_area)
-        
-        main_layout.addWidget(source_group)
         
         # Target audio selection
         target_layout = QHBoxLayout()
@@ -506,7 +472,40 @@ class MainWindow(QMainWindow):
         
         main_layout.addWidget(params_group)
         
-
+        # Source audio selection
+        source_group = QGroupBox("Source Audio Files")
+        source_layout = QVBoxLayout(source_group)
+        
+        # Header with buttons
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(QLabel("Add files to convert - each file will be converted using the same reference audio"))
+        header_layout.addStretch(1)
+        source_layout.addLayout(header_layout)
+        
+        # Button bar
+        button_layout = QHBoxLayout()
+        add_files_btn = QPushButton("Add Files...")
+        add_files_btn.clicked.connect(self.addSourceFiles)
+        clear_all_btn = QPushButton("Clear All")
+        clear_all_btn.clicked.connect(self.clearSourceFiles)
+        
+        button_layout.addWidget(add_files_btn)
+        button_layout.addWidget(clear_all_btn)
+        button_layout.addStretch(1)
+        source_layout.addLayout(button_layout)
+        
+        # Create scroll area for files
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_content = QWidget()
+        self.files_layout = QVBoxLayout(scroll_content)
+        self.files_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        scroll_area.setWidget(scroll_content)
+        source_layout.addWidget(scroll_area)
+        
+        # Add source group to main layout
+        main_layout.addWidget(source_group)
         
         # Conversion control section
         control_group = QGroupBox("Conversion Control")
