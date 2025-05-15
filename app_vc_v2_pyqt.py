@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QLabel, QSlider, QCheckBox,
     QFileDialog, QVBoxLayout, QHBoxLayout, QWidget, QProgressBar, QGroupBox,
     QFormLayout, QComboBox, QStyleFactory, QMessageBox, QSpacerItem, QSizePolicy,
-    QListWidget, QScrollArea, QFrame
+    QListWidget, QScrollArea, QFrame, QLineEdit
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QUrl, QBuffer, QIODevice, QByteArray
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QMediaFormat
@@ -354,11 +354,10 @@ class SliderWithValue(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, vc_wrapper, output_dir, examples=None):
+    def __init__(self, vc_wrapper, output_dir):
         super().__init__()
         self.vc_wrapper = vc_wrapper
         self.output_dir = output_dir
-        self.examples = examples or []
         self.audio_player = AudioPlayer(self)
         self.conversion_threads = {}
         self.output_file_path = None
@@ -385,19 +384,6 @@ class MainWindow(QMainWindow):
         desc_label.setOpenExternalLinks(True)
         desc_label.setWordWrap(True)
         main_layout.addWidget(desc_label)
-
-        # Add output folder display
-        output_folder_layout = QHBoxLayout()
-        output_folder_label = QLabel("Output Folder:")
-        self.output_folder_path = QLabel(self.output_dir)
-        self.output_folder_path.setStyleSheet("font-weight: bold;")
-        output_folder_open_btn = QPushButton("Open Folder")
-        output_folder_open_btn.clicked.connect(self.openOutputFolder)
-        
-        output_folder_layout.addWidget(output_folder_label)
-        output_folder_layout.addWidget(self.output_folder_path, 1)
-        output_folder_layout.addWidget(output_folder_open_btn)
-        main_layout.addLayout(output_folder_layout)
         
         # File input section
         file_group = QGroupBox("Audio Input Files")
@@ -520,22 +506,26 @@ class MainWindow(QMainWindow):
         
         main_layout.addWidget(params_group)
         
-        # Example section (if available)
-        if self.examples:
-            examples_group = QGroupBox("Examples")
-            examples_layout = QHBoxLayout(examples_group)
-            
-            for i, example in enumerate(self.examples):
-                example_btn = QPushButton(f"Example {i+1}")
-                example_btn.clicked.connect(lambda checked, idx=i: self.loadExample(idx))
-                examples_layout.addWidget(example_btn)
-                
-            examples_layout.addStretch(1)
-            main_layout.addWidget(examples_group)
+
         
         # Conversion control section
         control_group = QGroupBox("Conversion Control")
         control_layout = QVBoxLayout(control_group)
+        
+        # Add output folder selection
+        output_folder_layout = QHBoxLayout()
+        output_folder_label = QLabel("Output Folder:")
+        self.output_folder_path = QLineEdit(self.output_dir)
+        output_folder_browse_btn = QPushButton("Browse...")
+        output_folder_browse_btn.clicked.connect(self.browseOutputFolder)
+        output_folder_open_btn = QPushButton("Open Folder")
+        output_folder_open_btn.clicked.connect(self.openOutputFolder)
+        
+        output_folder_layout.addWidget(output_folder_label)
+        output_folder_layout.addWidget(self.output_folder_path, 1)
+        output_folder_layout.addWidget(output_folder_browse_btn)
+        output_folder_layout.addWidget(output_folder_open_btn)
+        control_layout.addLayout(output_folder_layout)
         
         # Add convert button
         button_layout = QHBoxLayout()
@@ -567,18 +557,30 @@ class MainWindow(QMainWindow):
         # Add some stretch at the end
         main_layout.addStretch(1)
         
+    def browseOutputFolder(self):
+        """Open a dialog to select an output folder."""
+        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder", self.output_dir)
+        if folder:
+            self.output_dir = folder
+            self.output_folder_path.setText(folder)
+            
     def openOutputFolder(self):
         """Open the output folder in the file explorer."""
-        if os.path.exists(self.output_dir):
+        # Get the current path from the text field
+        folder_path = self.output_folder_path.text()
+        
+        if os.path.exists(folder_path):
             # Use the appropriate command based on the operating system
             if sys.platform == 'win32':
-                os.startfile(self.output_dir)
+                os.startfile(folder_path)
             elif sys.platform == 'darwin':  # macOS
                 import subprocess
-                subprocess.Popen(['open', self.output_dir])
+                subprocess.Popen(['open', folder_path])
             else:  # Linux and other Unix-like
                 import subprocess
-                subprocess.Popen(['xdg-open', self.output_dir])
+                subprocess.Popen(['xdg-open', folder_path])
+        else:
+            QMessageBox.warning(self, "Invalid Folder", "The specified output folder does not exist.")
                 
     def addSourceFiles(self):
         """Open a file dialog to select multiple source audio files."""
@@ -640,42 +642,7 @@ class MainWindow(QMainWindow):
         """Stop audio playback."""
         self.audio_player.stop()
             
-    def loadExample(self, example_idx):
-        """Load a predefined example."""
-        if not self.processing_complete:
-            QMessageBox.warning(self, "Processing in Progress",
-                              "Please wait for current processing to complete or cancel it first.")
-            return
-            
-        if example_idx < len(self.examples):
-            example = self.examples[example_idx]
-            
-            # Clear previous files
-            self.clearSourceFiles()
-            
-            # Add the example source file
-            self.source_files = [example[0]]
-            audio_item = AudioItemWidget(example[0])
-            audio_item.playRequested.connect(self.playAudioFile)
-            self.audio_items.append(audio_item)
-            self.files_layout.addWidget(audio_item)
-            
-            # Set target audio
-            self.target_path_label.setText(example[1])
-            self.target_path_label.setStyleSheet("")
-            
-            # Set parameters
-            self.diffusion_steps_slider.setValue(example[2])
-            self.length_adjust_slider.setValue(example[3])
-            self.intelligibility_slider.setValue(example[4])
-            self.similarity_slider.setValue(example[5])
-            self.top_p_slider.setValue(example[6])
-            self.temperature_slider.setValue(example[7])
-            self.repetition_penalty_slider.setValue(example[8])
-            
-            # Set checkboxes
-            self.convert_style_checkbox.setChecked(example[9])
-            self.anonymization_checkbox.setChecked(example[10])
+
             
     def startConversion(self):
         """Start the voice conversion process for all source files."""
@@ -689,6 +656,22 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Input Required", 
                                "Please select a reference audio file.")
             return
+            
+        # Update output directory from the textbox
+        output_path = self.output_folder_path.text().strip()
+        if not output_path:
+            QMessageBox.warning(self, "Invalid Output Folder", "Please specify a valid output folder.")
+            return
+            
+        self.output_dir = output_path
+        
+        # Create the directory if it doesn't exist
+        if not os.path.exists(self.output_dir):
+            try:
+                os.makedirs(self.output_dir)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Could not create output directory: {str(e)}")
+                return
                 
         # Disable controls during conversion
         self.convert_btn.setEnabled(False)
@@ -839,16 +822,10 @@ def main(args):
     # Load models
     vc_wrapper = load_models(args)
     
-    # Define examples
-    examples = [
-        ["examples/source/yae_0.wav", "examples/reference/dingzhen_0.wav", 50, 1.0, 0.5, 0.5, 0.9, 1.0, 1.0, False, False],
-        ["examples/source/jay_0.wav", "examples/reference/azuma_0.wav", 50, 1.0, 0.5, 0.5, 0.9, 1.0, 1.0, False, False],
-    ]
-    
     # Create and show the application
     app = QApplication(sys.argv)
     app.setStyle(QStyleFactory.create('Fusion'))  # Use Fusion style for better appearance
-    window = MainWindow(vc_wrapper, output_dir=output_dir, examples=examples)
+    window = MainWindow(vc_wrapper, output_dir=output_dir)
     window.show()
     sys.exit(app.exec())
 
