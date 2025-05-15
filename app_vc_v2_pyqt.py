@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QLabel, QSlider, QCheckBox,
     QFileDialog, QVBoxLayout, QHBoxLayout, QWidget, QProgressBar, QGroupBox,
     QFormLayout, QComboBox, QStyleFactory, QMessageBox, QSpacerItem, QSizePolicy,
-    QListWidget
+    QListWidget, QScrollArea, QFrame
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QUrl, QBuffer, QIODevice, QByteArray
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QMediaFormat
@@ -67,19 +67,20 @@ def load_models(args):
 
 
 class VoiceConversionThread(QThread):
-    progressUpdate = pyqtSignal(int)  # Signal for progress updates (0-100)
+    progressUpdate = pyqtSignal(int, int)  # Signal for progress updates (file_index, progress 0-100)
     statusUpdate = pyqtSignal(str)    # Signal for status text updates
     streamOutput = pyqtSignal(bytes)  # Signal for streaming audio data
-    conversionComplete = pyqtSignal(str)  # Signal with path to output file
-    errorOccurred = pyqtSignal(str)   # Signal for error reporting
+    conversionComplete = pyqtSignal(int, str)  # Signal with file_index and path to output file
+    errorOccurred = pyqtSignal(int, str)   # Signal for error reporting with file_index
 
-    def __init__(self, vc_wrapper, source_path, target_path, params, output_dir):
+    def __init__(self, vc_wrapper, source_path, target_path, params, output_dir, file_index=0):
         super().__init__()
         self.vc_wrapper = vc_wrapper
         self.source_path = source_path
         self.target_path = target_path
         self.params = params
         self.output_dir = output_dir
+        self.file_index = file_index
         self.cancel_requested = False
         
         # Create output filename based on source filename with timestamp
@@ -143,26 +144,93 @@ class VoiceConversionThread(QThread):
                 # Update progress
                 chunk_count += 1
                 progress = min(int(chunk_count / total_chunks_estimate * 100), 99)
-                self.progressUpdate.emit(progress)
+                self.progressUpdate.emit(self.file_index, progress)
                 self.statusUpdate.emit(f"Processing chunk {chunk_count}...")
-            
+                
             # Save the complete audio to the output file
             if final_audio is not None:
                 sr, audio_data = final_audio
                 sf.write(self.output_path, audio_data, sr)
                 self.statusUpdate.emit("Conversion complete!")
-                self.progressUpdate.emit(100)
-                self.conversionComplete.emit(self.output_path)
+                self.progressUpdate.emit(self.file_index, 100)
+                self.conversionComplete.emit(self.file_index, self.output_path)
             else:
-                self.errorOccurred.emit("No output audio was generated.")
+                self.errorOccurred.emit(self.file_index, "No output audio was generated.")
                 
         except Exception as e:
-            self.errorOccurred.emit(f"Error during conversion: {str(e)}")
+            self.errorOccurred.emit(self.file_index, f"Error during conversion: {str(e)}")
             import traceback
             traceback.print_exc()
             
     def cancel(self):
         self.cancel_requested = True
+
+
+class AudioItemWidget(QWidget):
+    """Custom widget for displaying an audio file with progress and controls."""
+    
+    playRequested = pyqtSignal(str)  # Signal to request playback of this file
+    
+    def __init__(self, file_path, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.output_path = None
+        self.status = "Queued"  # Queued, Processing, Complete, Error
+        
+        # Create layout
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(5, 2, 5, 2)
+        
+        # File name
+        self.file_label = QLabel(os.path.basename(file_path))
+        
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        
+        # Status label
+        self.status_label = QLabel("Queued")
+        self.status_label.setMinimumWidth(80)
+        
+        # Play button (disabled initially)
+        self.play_button = QPushButton("Play")
+        self.play_button.setEnabled(False)
+        self.play_button.clicked.connect(self.requestPlay)
+        
+        # Add widgets to layout
+        layout.addWidget(self.file_label, 1)
+        layout.addWidget(self.progress_bar, 2)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.play_button)
+        
+    def setProgress(self, value):
+        """Update the progress bar value."""
+        self.progress_bar.setValue(value)
+        
+    def setStatus(self, status):
+        """Update the status of this file."""
+        self.status = status
+        self.status_label.setText(status)
+        
+        # Update the UI based on status
+        if status == "Complete":
+            self.progress_bar.setValue(100)
+            self.play_button.setEnabled(True)
+        elif status == "Error":
+            self.status_label.setStyleSheet("color: red;")
+        elif status == "Processing":
+            self.status_label.setStyleSheet("color: blue;")
+            
+    def setOutputPath(self, path):
+        """Set the output file path after conversion."""
+        self.output_path = path
+        
+    def requestPlay(self):
+        """Emit signal to request playback of this file."""
+        if self.output_path:
+            self.playRequested.emit(self.output_path)
 
 
 class AudioPlayer:
@@ -291,16 +359,14 @@ class MainWindow(QMainWindow):
         self.vc_wrapper = vc_wrapper
         self.output_dir = output_dir
         self.examples = examples or []
-        self.audio_players = {
-            'source': AudioPlayer(self),
-            'target': AudioPlayer(self),
-            'output': AudioPlayer(self)
-        }
-        self.conversion_thread = None
+        self.audio_player = AudioPlayer(self)
+        self.conversion_threads = {}
         self.output_file_path = None
         self.source_files = []  # List to store source file paths
+        self.audio_items = []  # List to store audio item widgets
         self.current_file_index = -1  # Index of currently processing file (-1 = not processing)
         self.bulk_processing = False  # Flag to indicate bulk processing is active
+        self.processing_complete = True  # Flag to indicate if processing is complete
         
         self.initUI()
         
@@ -338,34 +404,38 @@ class MainWindow(QMainWindow):
         file_layout = QVBoxLayout(file_group)
         
         # Source audio selection
-        source_layout = QVBoxLayout()  # Changed to vertical layout for list
-        source_header = QHBoxLayout()
-        source_label = QLabel("Source Audio Files:")
-        source_header.addWidget(source_label)
-        source_header.addStretch(1)
-        source_layout.addLayout(source_header)
+        source_group = QGroupBox("Source Audio Files")
+        source_layout = QVBoxLayout(source_group)
         
-        # Add list widget to display selected files
-        self.source_files_list = QListWidget()
-        self.source_files_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        self.source_files_list.setMinimumHeight(100)  # Give some vertical space
-        source_layout.addWidget(self.source_files_list)
+        # Header with buttons
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(QLabel("Add files to convert - each file will be converted using the same reference audio"))
+        header_layout.addStretch(1)
+        source_layout.addLayout(header_layout)
         
-        # Add buttons for file management
-        source_buttons = QHBoxLayout()
-        source_add_btn = QPushButton("Add Files...")
-        source_add_btn.clicked.connect(self.addSourceFiles)
-        source_remove_btn = QPushButton("Remove Selected")
-        source_remove_btn.clicked.connect(self.removeSourceFiles)
-        source_play_btn = QPushButton("Play Selected")
-        source_play_btn.clicked.connect(lambda: self.playSelectedSource())
+        # Button bar
+        button_layout = QHBoxLayout()
+        add_files_btn = QPushButton("Add Files...")
+        add_files_btn.clicked.connect(self.addSourceFiles)
+        clear_all_btn = QPushButton("Clear All")
+        clear_all_btn.clicked.connect(self.clearSourceFiles)
         
-        source_buttons.addWidget(source_add_btn)
-        source_buttons.addWidget(source_remove_btn)
-        source_buttons.addWidget(source_play_btn)
-        source_buttons.addStretch(1)
-        source_layout.addLayout(source_buttons)
-        file_layout.addLayout(source_layout)
+        button_layout.addWidget(add_files_btn)
+        button_layout.addWidget(clear_all_btn)
+        button_layout.addStretch(1)
+        source_layout.addLayout(button_layout)
+        
+        # Create scroll area for files
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_content = QWidget()
+        self.files_layout = QVBoxLayout(scroll_content)
+        self.files_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        scroll_area.setWidget(scroll_content)
+        source_layout.addWidget(scroll_area)
+        
+        main_layout.addWidget(source_group)
         
         # Target audio selection
         target_layout = QHBoxLayout()
@@ -481,39 +551,18 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.cancel_btn)
         control_layout.addLayout(button_layout)
         
-        # Add progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        control_layout.addWidget(self.progress_bar)
-        
         # Add status label
         self.status_label = QLabel("Ready")
         control_layout.addWidget(self.status_label)
         
         main_layout.addWidget(control_group)
         
-        # Output section
-        output_group = QGroupBox("Output")
-        output_layout = QHBoxLayout(output_group)
-        
-        # Add output controls
-        self.output_play_btn = QPushButton("Play Output")
-        self.output_play_btn.setEnabled(False)
-        self.output_play_btn.clicked.connect(lambda: self.playAudio('output'))
-        
-        self.output_stop_btn = QPushButton("Stop")
-        self.output_stop_btn.setEnabled(False)
-        self.output_stop_btn.clicked.connect(lambda: self.stopAudio('output'))
-        
+        # Remove the output section since we now have play buttons for each row
         self.last_output_label = QLabel("No output generated yet")
         self.last_output_label.setStyleSheet("color: gray;")
+        main_layout.addWidget(self.last_output_label)
         
-        output_layout.addWidget(self.output_play_btn)
-        output_layout.addWidget(self.output_stop_btn)
-        output_layout.addWidget(self.last_output_label, 1)
-        
-        main_layout.addWidget(output_group)
+        # No output_group to add anymore
         
         # Add some stretch at the end
         main_layout.addStretch(1)
@@ -533,6 +582,11 @@ class MainWindow(QMainWindow):
                 
     def addSourceFiles(self):
         """Open a file dialog to select multiple source audio files."""
+        if not self.processing_complete:
+            QMessageBox.warning(self, "Processing in Progress",
+                              "Please wait for current processing to complete or cancel it first.")
+            return
+            
         file_paths, _ = QFileDialog.getOpenFileNames(
             self, "Select Source Audio Files", "", AUDIO_EXTENSIONS
         )
@@ -540,30 +594,31 @@ class MainWindow(QMainWindow):
             for path in file_paths:
                 if path not in self.source_files:  # Avoid duplicates
                     self.source_files.append(path)
-                    self.source_files_list.addItem(os.path.basename(path))
+                    
+                    # Create and add item widget
+                    audio_item = AudioItemWidget(path)
+                    audio_item.playRequested.connect(self.playAudioFile)
+                    self.audio_items.append(audio_item)
+                    self.files_layout.addWidget(audio_item)
     
-    def removeSourceFiles(self):
-        """Remove selected files from the source files list."""
-        selected_items = self.source_files_list.selectedItems()
-        if not selected_items:
+    def clearSourceFiles(self):
+        """Clear all source files from the list."""
+        if not self.processing_complete:
+            QMessageBox.warning(self, "Processing in Progress",
+                              "Please wait for current processing to complete or cancel it first.")
             return
             
-        for item in selected_items:
-            row = self.source_files_list.row(item)
-            self.source_files_list.takeItem(row)
-            del self.source_files[row]
+        # Clear all file items
+        for item in self.audio_items:
+            self.files_layout.removeWidget(item)
+            item.deleteLater()
             
-    def playSelectedSource(self):
-        """Play the selected source audio file."""
-        selected_items = self.source_files_list.selectedItems()
-        if not selected_items:
-            return
+        self.audio_items.clear()
+        self.source_files.clear()
             
-        # Just play the first selected file
-        item = selected_items[0]
-        row = self.source_files_list.row(item)
-        file_path = self.source_files[row]
-        self.audio_players['source'].play_file(file_path)
+    def playAudioFile(self, file_path):
+        """Play an audio file."""
+        self.audio_player.play_file(file_path)
             
     def selectTargetFile(self):
         """Open a file dialog to select the target reference audio file."""
@@ -575,31 +630,37 @@ class MainWindow(QMainWindow):
             self.target_path_label.setStyleSheet("")
             
     def playAudio(self, audio_type):
-        """Play the selected audio file."""
-        if audio_type == 'source':
-            # For source files, use playSelectedSource instead
-            self.playSelectedSource()
-        elif audio_type == 'target':
+        """Play the selected audio file (for target audio)."""
+        if audio_type == 'target':
             file_path = self.target_path_label.text()
             if file_path != "No file selected":
-                self.audio_players['target'].play_file(file_path)
-        elif audio_type == 'output' and self.output_file_path:
-            self.audio_players['output'].play_file(self.output_file_path)
+                self.audio_player.play_file(file_path)
             
-    def stopAudio(self, audio_type):
+    def stopAudio(self):
         """Stop audio playback."""
-        self.audio_players[audio_type].stop()
+        self.audio_player.stop()
             
     def loadExample(self, example_idx):
         """Load a predefined example."""
+        if not self.processing_complete:
+            QMessageBox.warning(self, "Processing in Progress",
+                              "Please wait for current processing to complete or cancel it first.")
+            return
+            
         if example_idx < len(self.examples):
             example = self.examples[example_idx]
             
-            # Clear previous files and add the example source file
-            self.source_files = [example[0]]
-            self.source_files_list.clear()
-            self.source_files_list.addItem(os.path.basename(example[0]))
+            # Clear previous files
+            self.clearSourceFiles()
             
+            # Add the example source file
+            self.source_files = [example[0]]
+            audio_item = AudioItemWidget(example[0])
+            audio_item.playRequested.connect(self.playAudioFile)
+            self.audio_items.append(audio_item)
+            self.files_layout.addWidget(audio_item)
+            
+            # Set target audio
             self.target_path_label.setText(example[1])
             self.target_path_label.setStyleSheet("")
             
@@ -632,7 +693,7 @@ class MainWindow(QMainWindow):
         # Disable controls during conversion
         self.convert_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
-        self.progress_bar.setValue(0)
+        self.processing_complete = False
         
         # Get parameters
         params = {
@@ -649,62 +710,56 @@ class MainWindow(QMainWindow):
         
         # Start bulk processing
         self.bulk_processing = True
-        self.current_file_index = -1
         self.updateStatus(f"Starting bulk processing of {len(self.source_files)} files...")
         
-        # Process the first file
-        self.processNextFile(params, target_path)
-        
-    def processNextFile(self, params, target_path):
-        """Process the next file in the queue."""
-        self.current_file_index += 1
-        
-        if self.current_file_index >= len(self.source_files):
-            # We're done with all files
-            self.bulk_processing = False
-            self.current_file_index = -1
-            self.updateStatus(f"Bulk processing complete! All {len(self.source_files)} files processed.")
-            self.convert_btn.setEnabled(True)
-            self.cancel_btn.setEnabled(False)
-            return
-        
-        # Get the current file to process
-        current_source = self.source_files[self.current_file_index]
-        filename = os.path.basename(current_source)
-        
-        # Update UI to show current progress
-        self.updateStatus(f"Processing file {self.current_file_index + 1} of {len(self.source_files)}: {filename}")
-        self.source_files_list.setCurrentRow(self.current_file_index)
-        
-        # Create and start the conversion thread
-        self.conversion_thread = VoiceConversionThread(
-            self.vc_wrapper, current_source, target_path, params, self.output_dir
-        )
-        
-        # Connect signals
-        self.conversion_thread.progressUpdate.connect(self.updateProgress)
-        self.conversion_thread.statusUpdate.connect(self.updateStatus)
-        self.conversion_thread.streamOutput.connect(self.handleStreamOutput)
-        self.conversion_thread.conversionComplete.connect(self.handleConversionComplete)
-        self.conversion_thread.errorOccurred.connect(self.handleConversionError)
-        self.conversion_thread.finished.connect(self.handleThreadFinished)
-        
-        # Start the thread
-        self.conversion_thread.start()
+        # Process all files in parallel
+        self.conversion_threads = {}
+        for i, source_file in enumerate(self.source_files):
+            # Update item status
+            self.audio_items[i].setStatus("Processing")
+            self.audio_items[i].setProgress(0)
+            
+            # Create conversion thread for this file
+            thread = VoiceConversionThread(
+                self.vc_wrapper, source_file, target_path, params, self.output_dir, file_index=i
+            )
+            
+            # Connect signals
+            thread.progressUpdate.connect(self.updateFileProgress)
+            thread.statusUpdate.connect(self.updateStatus)
+            thread.streamOutput.connect(self.handleStreamOutput)
+            thread.conversionComplete.connect(self.handleFileComplete)
+            thread.errorOccurred.connect(self.handleFileError)
+            # We need to use a custom function to capture the index correctly in the lambda
+            def make_finished_handler(idx):
+                return lambda: self.handleThreadFinished(idx)
+                
+            thread.finished.connect(make_finished_handler(i))
+            
+            # Store the thread
+            self.conversion_threads[i] = thread
+            
+            # Start the thread
+            thread.start()
             
     def cancelConversion(self):
-        """Cancel the ongoing conversion process."""
-        if self.conversion_thread and self.conversion_thread.isRunning():
-            self.updateStatus("Cancelling conversion...")
-            self.conversion_thread.cancel()
+        """Cancel all ongoing conversion processes."""
+        if self.conversion_threads:
+            self.updateStatus("Cancelling all conversions...")
+            
+            # Cancel all running threads
+            for thread in self.conversion_threads.values():
+                if thread.isRunning():
+                    thread.cancel()
         
         # Reset bulk processing status
         self.bulk_processing = False
-        self.current_file_index = -1
+        self.processing_complete = True
             
-    def updateProgress(self, value):
-        """Update the progress bar."""
-        self.progress_bar.setValue(value)
+    def updateFileProgress(self, file_index, value):
+        """Update progress for a specific file."""
+        if 0 <= file_index < len(self.audio_items):
+            self.audio_items[file_index].setProgress(value)
         
     def updateStatus(self, status_text):
         """Update the status label."""
@@ -715,73 +770,46 @@ class MainWindow(QMainWindow):
         # Just update the status for now
         self.updateStatus("Received audio stream chunk...")
         
-    def handleConversionComplete(self, output_path):
-        """Handle completion of the conversion process."""
-        self.output_file_path = output_path
-        filename = os.path.basename(output_path)
-        self.last_output_label.setText(filename)
-        self.last_output_label.setStyleSheet("")
-        
-        if self.bulk_processing:
-            self.updateStatus(f"File {self.current_file_index + 1} of {len(self.source_files)} complete! Output saved to: {filename}")
-        else:
-            self.updateStatus(f"Conversion complete! Output saved to: {filename}")
-        
-        # Enable output controls
-        self.output_play_btn.setEnabled(True)
-        self.output_stop_btn.setEnabled(True)
-        
-        # Play the output
-        self.playAudio('output')
-        
-        # If we're in bulk processing mode, move to the next file
-        if self.bulk_processing:
-            # Get parameters again (in case they changed)
-            params = {
-                'diffusion_steps': int(self.diffusion_steps_slider.value()),
-                'length_adjust': self.length_adjust_slider.value(),
-                'intelligibility_cfg_rate': self.intelligibility_slider.value(),
-                'similarity_cfg_rate': self.similarity_slider.value(),
-                'top_p': self.top_p_slider.value(),
-                'temperature': self.temperature_slider.value(),
-                'repetition_penalty': self.repetition_penalty_slider.value(),
-                'convert_style': self.convert_style_checkbox.isChecked(),
-                'anonymization_only': self.anonymization_checkbox.isChecked()
-            }
-            target_path = self.target_path_label.text()
-            self.processNextFile(params, target_path)
-        
-    def handleConversionError(self, error_message):
-        """Handle errors during conversion."""
-        if self.bulk_processing:
-            current_file = os.path.basename(self.source_files[self.current_file_index])
-            QMessageBox.critical(self, "Conversion Error", 
-                              f"Error processing file {self.current_file_index + 1} ({current_file}): {error_message}")
-            self.updateStatus(f"Error on file {self.current_file_index + 1}: {error_message}")
+    def handleFileComplete(self, file_index, output_path):
+        """Handle completion of a specific file's conversion."""
+        if 0 <= file_index < len(self.audio_items):
+            filename = os.path.basename(output_path)
+            self.updateStatus(f"File {file_index + 1} complete! Output saved to: {filename}")
             
-            # If in bulk processing, try to continue with next file
-            params = {
-                'diffusion_steps': int(self.diffusion_steps_slider.value()),
-                'length_adjust': self.length_adjust_slider.value(),
-                'intelligibility_cfg_rate': self.intelligibility_slider.value(),
-                'similarity_cfg_rate': self.similarity_slider.value(),
-                'top_p': self.top_p_slider.value(),
-                'temperature': self.temperature_slider.value(),
-                'repetition_penalty': self.repetition_penalty_slider.value(),
-                'convert_style': self.convert_style_checkbox.isChecked(),
-                'anonymization_only': self.anonymization_checkbox.isChecked()
-            }
-            target_path = self.target_path_label.text()
-            self.processNextFile(params, target_path)
-        else:
-            QMessageBox.critical(self, "Conversion Error", error_message)
-            self.updateStatus(f"Error: {error_message}")
+            # Update the audio item
+            self.audio_items[file_index].setStatus("Complete")
+            self.audio_items[file_index].setOutputPath(output_path)
+            
+            # Keep track of the most recent output for the main output label
+            self.output_file_path = output_path
+            self.last_output_label.setText(filename)
+            self.last_output_label.setStyleSheet("")
         
-    def handleThreadFinished(self):
+    def handleFileError(self, file_index, error_message):
+        """Handle errors during conversion of a specific file."""
+        if 0 <= file_index < len(self.audio_items):
+            current_file = os.path.basename(self.source_files[file_index])
+            self.updateStatus(f"Error on file {file_index + 1} ({current_file}): {error_message}")
+            
+            # Update the audio item
+            self.audio_items[file_index].setStatus("Error")
+            
+            # Show error message
+            QMessageBox.critical(self, "Conversion Error", 
+                              f"Error processing file {file_index + 1} ({current_file}): {error_message}")
+        
+    def handleThreadFinished(self, file_index):
         """Handle thread completion."""
-        # Re-enable controls
-        self.convert_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
+        # Remove thread from active threads
+        if file_index in self.conversion_threads:
+            del self.conversion_threads[file_index]
+        
+        # If all threads are done, re-enable controls
+        if not self.conversion_threads:
+            self.convert_btn.setEnabled(True)
+            self.cancel_btn.setEnabled(False)
+            self.processing_complete = True
+            self.updateStatus(f"Bulk processing complete! {len(self.source_files)} files processed.")
     
     def closeEvent(self, event):
         """Handle window close event."""
