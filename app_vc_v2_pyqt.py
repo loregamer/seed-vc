@@ -796,7 +796,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle window close event."""
         # Stop any ongoing conversion
-        if self.conversion_thread and self.conversion_thread.isRunning():
+        if hasattr(self, "conversion_thread") and self.conversion_thread and self.conversion_thread.isRunning():
             self.conversion_thread.cancel()
             self.conversion_thread.wait(1000)  # Wait up to 1 second for thread to finish
             
