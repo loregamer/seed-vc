@@ -12,7 +12,8 @@ from typing import Optional, Tuple, Dict, List, Generator
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QLabel, QSlider, QCheckBox,
     QFileDialog, QVBoxLayout, QHBoxLayout, QWidget, QProgressBar, QGroupBox,
-    QFormLayout, QComboBox, QStyleFactory, QMessageBox, QSpacerItem, QSizePolicy
+    QFormLayout, QComboBox, QStyleFactory, QMessageBox, QSpacerItem, QSizePolicy,
+    QListWidget
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QUrl, QBuffer, QIODevice, QByteArray
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QMediaFormat
@@ -31,6 +32,14 @@ dtype = torch.float16
 
 # Media file extensions and formats
 AUDIO_EXTENSIONS = "Audio Files (*.wav *.mp3 *.flac *.ogg)"
+
+# Description for the application window
+APP_DESCRIPTION = """
+<b>Seed Voice Conversion V2</b> - Zero-shot voice conversion with in-context learning
+<br>Reference audio will be clipped to 25s if longer. Source audio will be processed in chunks if total exceeds 30s.
+<br>Bulk processing enabled: Add multiple source files to process with a single reference audio.
+<br>Visit <a href="https://github.com/Plachtaa/seed-vc">GitHub repository</a> for more details.
+"""
 
 def load_models(args):
     from hydra.utils import instantiate
@@ -289,6 +298,9 @@ class MainWindow(QMainWindow):
         }
         self.conversion_thread = None
         self.output_file_path = None
+        self.source_files = []  # List to store source file paths
+        self.current_file_index = -1  # Index of currently processing file (-1 = not processing)
+        self.bulk_processing = False  # Flag to indicate bulk processing is active
         
         self.initUI()
         
@@ -303,12 +315,7 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
         
         # Add description label
-        description = """
-        <b>Seed Voice Conversion V2</b> - Zero-shot voice conversion with in-context learning
-        <br>Reference audio will be clipped to 25s if longer. Source audio will be processed in chunks if total exceeds 30s.
-        <br>Visit <a href="https://github.com/Plachtaa/seed-vc">GitHub repository</a> for more details.
-        """
-        desc_label = QLabel(description)
+        desc_label = QLabel(APP_DESCRIPTION)
         desc_label.setOpenExternalLinks(True)
         desc_label.setWordWrap(True)
         main_layout.addWidget(desc_label)
@@ -331,19 +338,33 @@ class MainWindow(QMainWindow):
         file_layout = QVBoxLayout(file_group)
         
         # Source audio selection
-        source_layout = QHBoxLayout()
-        source_label = QLabel("Source Audio:")
-        self.source_path_label = QLabel("No file selected")
-        self.source_path_label.setStyleSheet("color: gray;")
-        source_browse_btn = QPushButton("Browse...")
-        source_browse_btn.clicked.connect(self.selectSourceFile)
-        source_play_btn = QPushButton("Play")
-        source_play_btn.clicked.connect(lambda: self.playAudio('source'))
+        source_layout = QVBoxLayout()  # Changed to vertical layout for list
+        source_header = QHBoxLayout()
+        source_label = QLabel("Source Audio Files:")
+        source_header.addWidget(source_label)
+        source_header.addStretch(1)
+        source_layout.addLayout(source_header)
         
-        source_layout.addWidget(source_label)
-        source_layout.addWidget(self.source_path_label, 1)
-        source_layout.addWidget(source_browse_btn)
-        source_layout.addWidget(source_play_btn)
+        # Add list widget to display selected files
+        self.source_files_list = QListWidget()
+        self.source_files_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.source_files_list.setMinimumHeight(100)  # Give some vertical space
+        source_layout.addWidget(self.source_files_list)
+        
+        # Add buttons for file management
+        source_buttons = QHBoxLayout()
+        source_add_btn = QPushButton("Add Files...")
+        source_add_btn.clicked.connect(self.addSourceFiles)
+        source_remove_btn = QPushButton("Remove Selected")
+        source_remove_btn.clicked.connect(self.removeSourceFiles)
+        source_play_btn = QPushButton("Play Selected")
+        source_play_btn.clicked.connect(lambda: self.playSelectedSource())
+        
+        source_buttons.addWidget(source_add_btn)
+        source_buttons.addWidget(source_remove_btn)
+        source_buttons.addWidget(source_play_btn)
+        source_buttons.addStretch(1)
+        source_layout.addLayout(source_buttons)
         file_layout.addLayout(source_layout)
         
         # Target audio selection
@@ -510,14 +531,39 @@ class MainWindow(QMainWindow):
                 import subprocess
                 subprocess.Popen(['xdg-open', self.output_dir])
                 
-    def selectSourceFile(self):
-        """Open a file dialog to select the source audio file."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select Source Audio File", "", AUDIO_EXTENSIONS
+    def addSourceFiles(self):
+        """Open a file dialog to select multiple source audio files."""
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select Source Audio Files", "", AUDIO_EXTENSIONS
         )
-        if file_path:
-            self.source_path_label.setText(file_path)
-            self.source_path_label.setStyleSheet("")
+        if file_paths:
+            for path in file_paths:
+                if path not in self.source_files:  # Avoid duplicates
+                    self.source_files.append(path)
+                    self.source_files_list.addItem(os.path.basename(path))
+    
+    def removeSourceFiles(self):
+        """Remove selected files from the source files list."""
+        selected_items = self.source_files_list.selectedItems()
+        if not selected_items:
+            return
+            
+        for item in selected_items:
+            row = self.source_files_list.row(item)
+            self.source_files_list.takeItem(row)
+            del self.source_files[row]
+            
+    def playSelectedSource(self):
+        """Play the selected source audio file."""
+        selected_items = self.source_files_list.selectedItems()
+        if not selected_items:
+            return
+            
+        # Just play the first selected file
+        item = selected_items[0]
+        row = self.source_files_list.row(item)
+        file_path = self.source_files[row]
+        self.audio_players['source'].play_file(file_path)
             
     def selectTargetFile(self):
         """Open a file dialog to select the target reference audio file."""
@@ -531,9 +577,8 @@ class MainWindow(QMainWindow):
     def playAudio(self, audio_type):
         """Play the selected audio file."""
         if audio_type == 'source':
-            file_path = self.source_path_label.text()
-            if file_path != "No file selected":
-                self.audio_players['source'].play_file(file_path)
+            # For source files, use playSelectedSource instead
+            self.playSelectedSource()
         elif audio_type == 'target':
             file_path = self.target_path_label.text()
             if file_path != "No file selected":
@@ -550,9 +595,10 @@ class MainWindow(QMainWindow):
         if example_idx < len(self.examples):
             example = self.examples[example_idx]
             
-            # Set file paths
-            self.source_path_label.setText(example[0])
-            self.source_path_label.setStyleSheet("")
+            # Clear previous files and add the example source file
+            self.source_files = [example[0]]
+            self.source_files_list.clear()
+            self.source_files_list.addItem(os.path.basename(example[0]))
             
             self.target_path_label.setText(example[1])
             self.target_path_label.setStyleSheet("")
@@ -571,16 +617,18 @@ class MainWindow(QMainWindow):
             self.anonymization_checkbox.setChecked(example[10])
             
     def startConversion(self):
-        """Start the voice conversion process."""
-        source_path = self.source_path_label.text()
-        target_path = self.target_path_label.text()
-        
-        # Validate inputs
-        if source_path == "No file selected" or target_path == "No file selected":
+        """Start the voice conversion process for all source files."""
+        if not self.source_files:
             QMessageBox.warning(self, "Input Required", 
-                               "Please select both source and reference audio files.")
+                               "Please add at least one source audio file.")
             return
             
+        target_path = self.target_path_label.text()
+        if target_path == "No file selected":
+            QMessageBox.warning(self, "Input Required", 
+                               "Please select a reference audio file.")
+            return
+                
         # Disable controls during conversion
         self.convert_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
@@ -599,9 +647,38 @@ class MainWindow(QMainWindow):
             'anonymization_only': self.anonymization_checkbox.isChecked()
         }
         
+        # Start bulk processing
+        self.bulk_processing = True
+        self.current_file_index = -1
+        self.updateStatus(f"Starting bulk processing of {len(self.source_files)} files...")
+        
+        # Process the first file
+        self.processNextFile(params, target_path)
+        
+    def processNextFile(self, params, target_path):
+        """Process the next file in the queue."""
+        self.current_file_index += 1
+        
+        if self.current_file_index >= len(self.source_files):
+            # We're done with all files
+            self.bulk_processing = False
+            self.current_file_index = -1
+            self.updateStatus(f"Bulk processing complete! All {len(self.source_files)} files processed.")
+            self.convert_btn.setEnabled(True)
+            self.cancel_btn.setEnabled(False)
+            return
+        
+        # Get the current file to process
+        current_source = self.source_files[self.current_file_index]
+        filename = os.path.basename(current_source)
+        
+        # Update UI to show current progress
+        self.updateStatus(f"Processing file {self.current_file_index + 1} of {len(self.source_files)}: {filename}")
+        self.source_files_list.setCurrentRow(self.current_file_index)
+        
         # Create and start the conversion thread
         self.conversion_thread = VoiceConversionThread(
-            self.vc_wrapper, source_path, target_path, params, self.output_dir
+            self.vc_wrapper, current_source, target_path, params, self.output_dir
         )
         
         # Connect signals
@@ -620,6 +697,10 @@ class MainWindow(QMainWindow):
         if self.conversion_thread and self.conversion_thread.isRunning():
             self.updateStatus("Cancelling conversion...")
             self.conversion_thread.cancel()
+        
+        # Reset bulk processing status
+        self.bulk_processing = False
+        self.current_file_index = -1
             
     def updateProgress(self, value):
         """Update the progress bar."""
@@ -641,7 +722,10 @@ class MainWindow(QMainWindow):
         self.last_output_label.setText(filename)
         self.last_output_label.setStyleSheet("")
         
-        self.updateStatus(f"Conversion complete! Output saved to: {filename}")
+        if self.bulk_processing:
+            self.updateStatus(f"File {self.current_file_index + 1} of {len(self.source_files)} complete! Output saved to: {filename}")
+        else:
+            self.updateStatus(f"Conversion complete! Output saved to: {filename}")
         
         # Enable output controls
         self.output_play_btn.setEnabled(True)
@@ -650,10 +734,48 @@ class MainWindow(QMainWindow):
         # Play the output
         self.playAudio('output')
         
+        # If we're in bulk processing mode, move to the next file
+        if self.bulk_processing:
+            # Get parameters again (in case they changed)
+            params = {
+                'diffusion_steps': int(self.diffusion_steps_slider.value()),
+                'length_adjust': self.length_adjust_slider.value(),
+                'intelligibility_cfg_rate': self.intelligibility_slider.value(),
+                'similarity_cfg_rate': self.similarity_slider.value(),
+                'top_p': self.top_p_slider.value(),
+                'temperature': self.temperature_slider.value(),
+                'repetition_penalty': self.repetition_penalty_slider.value(),
+                'convert_style': self.convert_style_checkbox.isChecked(),
+                'anonymization_only': self.anonymization_checkbox.isChecked()
+            }
+            target_path = self.target_path_label.text()
+            self.processNextFile(params, target_path)
+        
     def handleConversionError(self, error_message):
         """Handle errors during conversion."""
-        QMessageBox.critical(self, "Conversion Error", error_message)
-        self.updateStatus(f"Error: {error_message}")
+        if self.bulk_processing:
+            current_file = os.path.basename(self.source_files[self.current_file_index])
+            QMessageBox.critical(self, "Conversion Error", 
+                              f"Error processing file {self.current_file_index + 1} ({current_file}): {error_message}")
+            self.updateStatus(f"Error on file {self.current_file_index + 1}: {error_message}")
+            
+            # If in bulk processing, try to continue with next file
+            params = {
+                'diffusion_steps': int(self.diffusion_steps_slider.value()),
+                'length_adjust': self.length_adjust_slider.value(),
+                'intelligibility_cfg_rate': self.intelligibility_slider.value(),
+                'similarity_cfg_rate': self.similarity_slider.value(),
+                'top_p': self.top_p_slider.value(),
+                'temperature': self.temperature_slider.value(),
+                'repetition_penalty': self.repetition_penalty_slider.value(),
+                'convert_style': self.convert_style_checkbox.isChecked(),
+                'anonymization_only': self.anonymization_checkbox.isChecked()
+            }
+            target_path = self.target_path_label.text()
+            self.processNextFile(params, target_path)
+        else:
+            QMessageBox.critical(self, "Conversion Error", error_message)
+            self.updateStatus(f"Error: {error_message}")
         
     def handleThreadFinished(self):
         """Handle thread completion."""
@@ -697,6 +819,7 @@ def main(args):
     
     # Create and show the application
     app = QApplication(sys.argv)
+    app.setStyle(QStyleFactory.create('Fusion'))  # Use Fusion style for better appearance
     window = MainWindow(vc_wrapper, output_dir=output_dir, examples=examples)
     window.show()
     sys.exit(app.exec())
