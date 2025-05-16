@@ -10,6 +10,8 @@ pyinstaller --noconfirm --onefile --windowed ^
   --add-data "checkpoints;checkpoints" ^
   --add-data "examples;examples" ^
   --add-data "modules;modules" ^
+  --exclude PyQt5 ^
+  --exclude PySide6 ^
   app_vc_v2_pyqt.py
 
 echo.
