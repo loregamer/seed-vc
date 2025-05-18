@@ -2,7 +2,7 @@ torch==2.6.0 --index-url https://download.pytorch.org/whl/cu126
 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu126
 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
 accelerate
-scipy==1.13.1
+scipy==1.15.3
 librosa==0.10.2
 huggingface-hub>=0.28.1
 munch==4.0.0
